@@ -86,7 +86,7 @@ def main():
             st.success(f"✅ Document processed successfully! ({num_chunks} sections analyzed)")
 
     with col1:
-        st.subheader("💬 Chat with Your Legal Assistant")
+        st.subheader("💬 Hi, I am here ")
         for message in st.session_state.chat_history:
             with st.chat_message(message["role"]):
                 st.markdown(message["content"])
