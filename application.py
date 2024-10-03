@@ -1,126 +1,116 @@
 import streamlit as st
-from typing import List, Dict
-import pandas as pd
-from dataclasses import dataclass, field
-import io
+import os
+from dotenv import load_dotenv
+from openai import OpenAI
+from typing import List
+import chromadb
+from chromadb.utils import embedding_functions
 from docx import Document
 
-@dataclass
-class DocumentProcessor:
-    content: str = ""
-    chunks: List[str] = field(default_factory=list)
+load_dotenv()
+client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
 
-    def process(self, file) -> None:
-        file_name = file.name.lower()
-        if file_name.endswith('.txt'):
-            self._process_text(file)
-        elif file_name.endswith('.docx'):
-            self._process_docx(file)
-        else:
-            raise ValueError(f"Unsupported file type: {file.name}")
-        self._split_content()
+def chunk_document(text: str, chunk_size: int = 1000) -> List[str]:
+    words = text.split()
+    return [' '.join(words[i:i+chunk_size]) for i in range(0, len(words), chunk_size)]
 
-    def _process_text(self, file) -> None:
-        content = file.getvalue()
-        encodings = ['utf-8', 'iso-8859-1', 'windows-1252']
-        for encoding in encodings:
-            try:
-                self.content = content.decode(encoding)
-                return
-            except UnicodeDecodeError:
-                continue
-        raise ValueError("Unable to decode the file with supported encodings.")
+def setup_vector_db():
+    chroma_client = chromadb.Client()
+    embedding_func = embedding_functions.OpenAIEmbeddingFunction(
+        api_key=os.getenv('OPENAI_API_KEY'),
+        model_name="text-embedding-ada-002"
+    )
+    try:
+        return chroma_client.create_collection(name="legal_docs", embedding_function=embedding_func)
+    except chromadb.db.base.UniqueConstraintError:
+        return chroma_client.get_collection(name="legal_docs", embedding_function=embedding_func)
 
-    def _process_docx(self, file) -> None:
-        docx_file = io.BytesIO(file.getvalue())
-        doc = Document(docx_file)
-        self.content = "\n".join(paragraph.text for paragraph in doc.paragraphs)
+def preprocess_and_store_document(collection, document: str):
+    chunks = chunk_document(document)
+    collection.add(
+        documents=chunks,
+        ids=[f"chunk_{i}" for i in range(len(chunks))]
+    )
+    return len(chunks)
 
-    def _split_content(self, chunk_size: int = 1000) -> None:
-        words = self.content.split()
-        self.chunks = [' '.join(words[i:i+chunk_size]) for i in range(0, len(words), chunk_size)]
+def query_document(collection, query: str, k: int = 2) -> dict:
+    results = collection.query(query_texts=[query], n_results=k)
+    return {
+        'documents': results['documents'][0],
+        'distances': results['distances'][0],
+        'ids': results['ids'][0]
+    }
 
-class VectorStore:
-    def __init__(self, name: str):
-        self.name = name
-        self.data = pd.DataFrame(columns=['text', 'embedding'])
+def generate_response(context: str, question: str) -> str:
+    prompt = f"Context: {context}\n\nQuestion: {question}\n\nAnswer:"
+    response = client.chat.completions.create(
+        model="gpt-3.5-turbo",
+        messages=[
+            {"role": "system", "content": "You are a helpful legal assistant. Provide clear and concise answers."},
+            {"role": "user", "content": prompt}
+        ]
+    )
+    return response.choices[0].message.content
 
-    def add(self, text: str) -> None:
-        new_row = pd.DataFrame({'text': [text], 'embedding': [[0]*10]})
-        self.data = pd.concat([self.data, new_row], ignore_index=True)
-
-    def query(self, question: str, k: int = 1) -> List[str]:
-        return self.data['text'].head(k).tolist()
-
-class ConversationManager:
-    def __init__(self, system_prompt: str):
-        self.messages = [{"role": "system", "content": system_prompt}]
-
-    def add_user_message(self, message: str) -> None:
-        self.messages.append({"role": "user", "content": message})
-
-    def add_assistant_message(self, message: str) -> None:
-        self.messages.append({"role": "assistant", "content": message})
-
-    def get_messages(self) -> List[Dict[str, str]]:
-        return self.messages
-
-def simulate_chat(messages: List[Dict[str, str]]) -> str:
-    return f"Response to: {messages[-1]['content']}"
+def read_docx(file):
+    doc = Document(file)
+    return " ".join([paragraph.text for paragraph in doc.paragraphs])
 
 def main():
-    st.set_page_config(page_title="Legal Q&A System", layout="wide")
-    st.title("Ask Me Anything About Law")
+    st.set_page_config(page_title="Legal Assistant", page_icon="⚖️", layout="wide")
+    st.title("🤖 Your AI Legal Assistant")
 
-    if 'conversation' not in st.session_state:
-        st.session_state['conversation'] = ConversationManager("You are a legal specialist.")
-    if 'vector_store' not in st.session_state:
-        st.session_state['vector_store'] = None
+    if 'vector_db' not in st.session_state:
+        st.session_state.vector_db = setup_vector_db()
+    
+    if 'chat_history' not in st.session_state:
+        st.session_state.chat_history = []
 
-    uploaded_file = st.file_uploader("Upload your document", type=["txt", "docx"])
+    col1, col2 = st.columns([2, 1])
 
-    if uploaded_file:
-        try:
-            doc_processor = DocumentProcessor()
-            doc_processor.process(uploaded_file)
-            
-            vector_store = VectorStore(uploaded_file.name)
-            for chunk in doc_processor.chunks:
-                vector_store.add(chunk)
-            
-            st.session_state['vector_store'] = vector_store
-            st.success("Document processed and indexed successfully!")
-        except ValueError as e:
-            st.error(f"Error processing file: {str(e)}")
-        except Exception as e:
-            st.error(f"An unexpected error occurred: {str(e)}")
+    with col2:
+        st.subheader("📄 Document Upload")
+        uploaded_file = st.file_uploader("Upload a legal document", type=["txt", "docx"])
+        
+        if uploaded_file is not None:
+            if uploaded_file.type == "text/plain":
+                document = uploaded_file.getvalue().decode("utf-8")
+            elif uploaded_file.type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+                document = read_docx(uploaded_file)
+            else:
+                st.error("Unsupported file type. Please upload a .txt or .docx file.")
+                return
 
-    question = st.text_input("Your Question:", placeholder="Ask about the law...")
+            with st.spinner("Processing document..."):
+                num_chunks = preprocess_and_store_document(st.session_state.vector_db, document)
+            st.success(f"✅ Document processed successfully! ({num_chunks} sections analyzed)")
 
-    if st.button("Ask") and question:
-        if st.session_state['vector_store']:
-            relevant_text = st.session_state['vector_store'].query(question)[0]
-            prompt = f"""
-            Based on the following text extracted from the legislation:
-            <extracted text>
-            {relevant_text}
-            </extracted text>
-            Answer the following question:
-            <question>
-            {question}
-            </question>
-            Make sure to reference your answer according to the extracted text.
-            """
-        else:
-            prompt = question
+    with col1:
+        st.subheader("💬 Chat with Your Legal Assistant")
+        for message in st.session_state.chat_history:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
 
-        st.session_state['conversation'].add_user_message(prompt)
-        response = simulate_chat(st.session_state['conversation'].get_messages())
-        st.session_state['conversation'].add_assistant_message(response)
+        question = st.chat_input("Ask a question about the legal document...")
 
-    st.subheader("Conversation History")
-    for message in st.session_state['conversation'].get_messages()[1:]:  # Skip system message
-        st.text(f"{message['role'].capitalize()}: {message['content']}")
+        if question:
+            st.session_state.chat_history.append({"role": "user", "content": question})
+            with st.chat_message("user"):
+                st.markdown(question)
+
+            with st.spinner("Searching for relevant information..."):
+                results = query_document(st.session_state.vector_db, question)
+
+            with st.chat_message("assistant"):
+                context = " ".join(results['documents'])
+                response = generate_response(context, question)
+                st.markdown(response)
+                st.session_state.chat_history.append({"role": "assistant", "content": response})
+
+            with st.expander("📚 View relevant document sections"):
+                for i, (doc, distance) in enumerate(zip(results['documents'], results['distances']), 1):
+                    st.markdown(f"**Section {i}** (Relevance: {(1-distance)*100:.1f}%)")
+                    st.text(doc[:200] + "..." if len(doc) > 200 else doc)
 
 if __name__ == "__main__":
     main()
