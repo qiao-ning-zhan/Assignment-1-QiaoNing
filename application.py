@@ -150,7 +150,7 @@ def main():
                 st.write(f"- {filename} ({chunks} sections)")
 
     with col1:
-        st.subheader("💬 Chat with Your Legal Assistant")
+        st.subheader("💬 Hi, I am here ")
         for message in st.session_state.chat_history:
             with st.chat_message(message["role"]):
                 st.markdown(message["content"])
