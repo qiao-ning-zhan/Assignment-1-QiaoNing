@@ -1,3 +1,3 @@
 # Assignment-1-QiaoNing
 
-[demo]{https://applicationpy-bvngydkfjqevrnlo7n6xph.streamlit.app}
+[demo](https://applicationpy-bvngydkfjqevrnlo7n6xph.streamlit.app)
